@@ -1,279 +1,123 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <math.h>
 
-
-
-static BOOL commentsOpen = NO;
-static BOOL reelPlaying = YES;
-static double playbackSpeed = 1.0;
-static __unsafe_unretained id currentReelCell = nil;
-static NSArray *feed = nil;
-static NSString *currentMediaPk = nil;
-static NSInteger lastPauseReason = -1;
-
-
-@interface NSObject (ScrollPartyMediaIdentifiers)
-- (NSString *)mediaPk;
-- (NSString *)saveId;
+@interface NSObject (ScrollPartyMediaMapDebug)
+- (id)saveId;
 @end
 
+%hook IGMediaMap
 
+- (id)mediaWithDict:(id)dict {
+    NSLog(@"[ScrollParty TRACE] IGMediaMap mediaWithDict:");
+    NSLog(@"[ScrollParty TRACE]     dict class = %@", [dict class]);
 
-static NSInteger getIndexOfMediaPk(id mediaPk) {
-    if (!mediaPk || !feed) {
-        return NSNotFound;
+    if ([dict respondsToSelector:@selector(allKeys)]) {
+        NSLog(@"[ScrollParty TRACE]     keys = %@", [dict allKeys]);
     }
 
-    for (NSInteger i = 0; i < (NSInteger)feed.count; i++) {
-        id item = feed[i];
-        if ([[item saveId] isEqual:mediaPk]) {
-            return i;
-        }
+    id result = %orig;
+
+    NSLog(@"[ScrollParty TRACE]     result class = %@", [result class]);
+
+    if ([result respondsToSelector:@selector(saveId)]) {
+        NSLog(@"[ScrollParty TRACE]     result saveId = %@", [result saveId]);
     }
-    return NSNotFound;
+
+    return result;
 }
 
+- (id)objectWithDict:(id)dict {
+    NSLog(@"[ScrollParty TRACE] IGMediaMap objectWithDict:");
+    NSLog(@"[ScrollParty TRACE]     dict class = %@", [dict class]);
 
-/*
-Helper method to detect direction of reel change (next or previous) based on the current and next mediaPk. 
-Returns 1 for next, -1 for previous, and 0 for unknown.
-*/
-static NSInteger detectReelDirection(id oldMediaPk, id newMediaPk) {
-    if (!oldMediaPk || !newMediaPk || !feed) {
-        return 0; // Unknown direction
-    }
-    
-    
-    NSInteger currentIndex = getIndexOfMediaPk(oldMediaPk);
-    if (currentIndex == NSNotFound) {
-        return 0; // Unknown direction
+    if ([dict respondsToSelector:@selector(allKeys)]) {
+        NSLog(@"[ScrollParty TRACE]     keys = %@", [dict allKeys]);
     }
 
-    if (currentIndex + 1 < (NSInteger)feed.count) {
-        id nextItem = feed[currentIndex + 1];
-        if ([[nextItem saveId] isEqual:newMediaPk]) {
-            return 1; // Next
-        }
+    id result = %orig;
+
+    NSLog(@"[ScrollParty TRACE]     result class = %@", [result class]);
+
+    if ([result respondsToSelector:@selector(saveId)]) {
+        NSLog(@"[ScrollParty TRACE]     result saveId = %@", [result saveId]);
     }
 
-    if (currentIndex > 0) {
-        id previousItem = feed[currentIndex - 1];
-        if ([[previousItem saveId] isEqual:newMediaPk]) {
-            return -1; // Previous
-        }
-    }
-    return 0; // Unknown direction    
-
+    return result;
 }
 
+- (id)objectWithPk:(id)pk initialTree:(id)tree {
+    NSLog(@"[ScrollParty TRACE] IGMediaMap objectWithPk:initialTree:");
+    NSLog(@"[ScrollParty TRACE]     pk = %@", pk);
+    NSLog(@"[ScrollParty TRACE]     tree class = %@", [tree class]);
 
-%hook IGSundialViewerVideoCell
+    id result = %orig;
 
-// Method to detect if the reel is paused due to a transition
-- (void)pauseWithReason:(NSInteger)reason {
-    lastPauseReason = reason;
-    %orig;
+    NSLog(@"[ScrollParty TRACE]     result class = %@", [result class]);
+
+    if ([result respondsToSelector:@selector(saveId)]) {
+        NSLog(@"[ScrollParty TRACE]     result saveId = %@", [result saveId]);
+    }
+
+    return result;
 }
 
+- (id)constructInstanceWithPK:(id)pk initialTree:(id)tree {
+    NSLog(@"[ScrollParty TRACE] IGMediaMap constructInstanceWithPK:initialTree:");
+    NSLog(@"[ScrollParty TRACE]     pk = %@", pk);
+    NSLog(@"[ScrollParty TRACE]     tree class = %@", [tree class]);
 
+    id result = %orig;
 
-// Method to detect when the reel is paused
-- (void)videoViewDidPause:(id)videoView
-{
-    %orig;
+    NSLog(@"[ScrollParty TRACE]     result class = %@", [result class]);
 
-    if (lastPauseReason == 3) {
-        return; // Ignore pause due to transition
-    } 
-
-    if (reelPlaying) {
-        reelPlaying = NO;
-        NSLog(@"[ScrollParty Detection] Reel paused");
+    if ([result respondsToSelector:@selector(saveId)]) {
+        NSLog(@"[ScrollParty TRACE]     result saveId = %@", [result saveId]);
     }
+
+    return result;
 }
 
+- (id)getIGMediaWithFragment:(id)fragment error:(id *)error {
+    NSLog(@"[ScrollParty TRACE] IGMediaMap getIGMediaWithFragment:error:");
+    NSLog(@"[ScrollParty TRACE]     fragment class = %@", [fragment class]);
 
-// Method to detect reel stoppage
-- (void)videoViewDidStop:(id)videoView
-{
-    %orig;
-    //reelPlaying = NO;
-    //NSLog(@"[ScrollParty Detection] XXXXXXXXXXXX");
+    id result = %orig;
+
+    NSLog(@"[ScrollParty TRACE]     result class = %@", [result class]);
+
+    if ([result respondsToSelector:@selector(saveId)]) {
+        NSLog(@"[ScrollParty TRACE]     result saveId = %@", [result saveId]);
+    }
+
+    if (error && *error) {
+        NSLog(@"[ScrollParty TRACE]     error = %@", *error);
+    }
+
+    return result;
 }
 
-// Method to detect when the reel is played or changed
-- (void)sundialVideoPlaybackViewDidStartPlaying:(id)playbackView {
-    %orig;
+- (id)consolidateDeserializedObject:(id)obj {
+    NSLog(@"[ScrollParty TRACE] IGMediaMap consolidateDeserializedObject:");
+    NSLog(@"[ScrollParty TRACE]     input class = %@", [obj class]);
 
-    NSString *nextMediaPk = [(id)self mediaPk];
-
-    if (currentReelCell != self) {
-
-        if (currentReelCell == nil) {
-            NSLog(@"[ScrollParty Detection] Reels opened");
-        }
-
-        if (currentMediaPk != nil){
-            NSInteger direction = detectReelDirection(currentMediaPk, nextMediaPk);
-            if (direction == 1) {
-                //NSLog(@"[ScrollParty Detection] Next Reel played");
-            } else if (direction == -1) {
-                //NSLog(@"[ScrollParty Detection] Previous Reel played");
-            } else {
-                //NSLog(@"[ScrollParty Detection] Reel changed to unknown");
-            }
-        } 
-    }else {
-        if (!reelPlaying) {
-            NSLog(@"[ScrollParty Detection] Reel played");
-        }
+    if ([obj respondsToSelector:@selector(saveId)]) {
+        NSLog(@"[ScrollParty TRACE]     input saveId = %@", [obj saveId]);
     }
 
-    currentReelCell = self;
-    currentMediaPk = nextMediaPk;
+    id result = %orig;
 
-    reelPlaying = YES;
-}
+    NSLog(@"[ScrollParty TRACE]     result class = %@", [result class]);
 
-
-// Method to detect when speed is changed
-- (void)setPlaybackSpeed:(float)speed {
-    %orig;
-
-    if (fabs(speed - playbackSpeed) < 0.01f) {
-        return;
+    if ([result respondsToSelector:@selector(saveId)]) {
+        NSLog(@"[ScrollParty TRACE]     result saveId = %@", [result saveId]);
     }
 
-    playbackSpeed = speed;
-
-    NSLog(@"[ScrollParty Detection] Playback speed = %.2fx", speed);
-}
-%end
-
-
-
-%hook IGCommentThreadViewController
-
-// Method to detect when comments are opened
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-
-    if (!commentsOpen) {
-        commentsOpen = YES;
-
-        NSLog(@"[ScrollParty Detection] Comments opened");
-    }
-}
-
-// Method to detect when comments are closed
-- (void)viewDidDisappear:(BOOL)animated {
-    %orig;
-
-    if (commentsOpen) {
-        commentsOpen = NO;
-
-        NSLog(@"[ScrollParty Detection] Comments closed");
-    }
-}
-
-%end
-
-
-
-
-
-%group swiftHooks
-
-%hook dataSource
-
-- (id)objectsForListAdapter:(id)arg1 {
-    NSArray *original_feed = %orig;
-    NSMutableArray *filtered_feed = [NSMutableArray array];
-    for (id item in original_feed) {
-        if ([item isKindOfClass:%c(IGAdItem)]) {
-            continue;
-        }
-        [filtered_feed addObject:item];
-    }
-
-    feed = [filtered_feed copy];
-    return filtered_feed;
-}
-
-%end
-
-
-%end
-
-
-%hook IGSundialUnconnectedFeedNetworkSource
-
-// Method to detect when reels are refreshed
-- (void)sundialFeedNetworkSource:(id)source
-willStartNewFeedSessionWithId:(id)newSessionId
-               previousSessionId:(id)previousSessionId
-                    prefetchType:(NSInteger)prefetchType {
-
-    
-    feed = nil;
-    commentsOpen = NO;
-    reelPlaying = YES;
-    playbackSpeed = 1.0;
-    currentReelCell = nil;
-    currentMediaPk = nil;
-    lastPauseReason = -1;
-    %orig;
-
-    if (prefetchType == 0) {
-        NSLog(@"[ScrollParty Detection] Reels refreshed");
-    }
-}
-
-
-%end
-
-
-
-%hook IGSundialUnconnectedFeedNetworkSource
-
-- (void)activeSectionDidChangeFrom:(NSInteger)oldSection
-                               to:(NSInteger)newSection
-{
-    %orig;
-    if (oldSection < 0 || newSection < 0) {
-        return; // App boot
-    }
-
-    if (newSection == oldSection + 1) {
-        NSLog(@"[ScrollParty Detection] Next Reel played");
-    }
-    else if (newSection == oldSection - 1) {
-        NSLog(@"[ScrollParty Detection] Previous Reel played");
-    }
-    else if (newSection != oldSection) {
-        NSLog(@"[ScrollParty Detection] Reel changed to unknown");
-    }
+    return result;
 }
 
 %end
 
 %ctor {
-
     %init;
-    NSLog(@"[ScrollParty] Tweak loaded");
-    
-
-
-    Class dataSourceClass = objc_getClass("IGSundialFeedDataSource.IGSundialFeedDataSource");
-
-
-    if (dataSourceClass) {
-        %init(swiftHooks, dataSource = dataSourceClass);
-        NSLog(@"[ScrollParty] IGSundialFeedDataSource hooked");
-    }else {
-        NSLog(@"[ScrollParty] Failed to hook IGSundialFeedDataSource");
-    }
-
 }

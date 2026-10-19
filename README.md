@@ -1,726 +1,850 @@
-# Instagram Reels: Class & Method Mappings
+# ScrollParty
 
-Class and method mappings for observing and controlling the Instagram iOS Reels viewer: play/pause, playback speed, next/previous reel, opening/closing comments, and reading the reel list.
+ScrollParty is an experimental iOS tweak for synchronizing Instagram Reels between two devices.
 
-> **Tested on:** Instagram iOS **451.0.0** **Status:** Mappings are inferred from class dumps and **not yet verified**. Stage 1 of the [Roadmap](https://claude.ai/chat/0d650900-8293-4f22-b422-a75991e3aefb#roadmap) is testing which hooks work best. Selector names change between app versions. Re-check after updates.
+The project is currently focused on reverse-engineering Instagram's Reels implementation: detecting user actions, identifying the internal feed model, and determining whether a feed can be reconstructed on another device.
 
-* * *
+## Current status
 
-## Background
+Working:
 
-- **Sundial** is Instagram's internal codename for Reels.
-- The Reels viewer is built on IGListKit. A feed view controller owns a collection view, a data source supplies the list of items, and **each reel is its own section controller**.
-- Neighbouring reels are prefetched, so several section controllers exist at once. Reach the on-screen reel through the feed VC's `currentSectionController`.
+- Detect next / previous Reel
+- Detect play / pause
+- Detect playback speed changes
+- Detect comments open / close
+- Detect Reels refresh
+- Read the Reels feed from `objectsForListAdapter:`
+- Inspect `IGMedia` identifiers
+- Trace parts of `IGMediaMap` media construction
 
-* * *
+In progress:
 
-## Key classes
+- Reconstruct `IGMedia` from a media PK or serialized dictionary
+- Replace the Reels feed with a fixed custom array
+- Find internal methods for performing next / previous / play / pause / comments actions
+- Synchronize carousel position
+- Test cross-device feed reconstruction
 
-Abbrev.
+Not started:
 
-Role
+- WebSocket client
+- Room server
+- Room codes
+- Cross-device state synchronization
+- Reconnect / resync logic
 
-Runtime class name
+---
 
-**FVC**
+## Goal
 
-Reels feed view controller
+The final goal is a two-person Reels watch party.
 
-`IGSundialFeedViewController`
+A user creates a room, another user joins it from a modified Instagram client, and both devices stay synchronized while either person can:
 
-**SC**
+- scroll to the next or previous Reel
+- play or pause
+- use 2x playback
+- open or close comments
+- move through carousel posts
 
-Per-reel video section controller
+The main problem is that two Instagram accounts normally have different personalized Reels feeds. ScrollParty therefore needs to synchronize both the current feed/media and the current UI/playback state.
 
-`IGSundialVideoSC.IGSundialViewerVideoSectionController`
+---
 
-**ASM**
+## Reels feed
 
-Active-section tracker
+The Reels data source is:
 
-`IGSundialFeedViewController.IGSundialFeedViewControllerActiveSectionManager`
-
-**DS**
-
-Reels feed data source
-
-`IGSundialFeed.IGSundialFeedDataSource` *(older)* or `IGSundialFeedDataSource.IGSundialFeedDataSource` *(newer)*
-
-Main feed data source
-
-`IGMainFeedListAdapterDataSource`
-
-Organic reel model
-
-`IGMedia`
-
-Ad model
-
-`IGAdItem`
-
-Dotted names are Swift classes registered with the Objective-C runtime under `Module.ClassName`. The data source's module name has changed between versions, so check both.
-
-**Object graph:**
-
-```
-IGSundialFeedViewController (FVC)
-  ├─ currentSectionController          → SC (check class; ads/carousels/midcards use others)
-  │    ├─ _videoCell                   → video cell
-  │    ├─ commentThreadViewController  → comments VC (when open)
-  │    ├─ fastReelsManager             → playback speed owner (not yet dumped)
-  │    └─ currentPlayerForExternalOwnership → underlying player (not yet dumped)
-  ├─ activeSectionManager              → ASM
-  └─ dataSource                        → DS
-       └─ objectsForListAdapter:       → NSArray of IGMedia / IGAdItem / other models, in feed order
+```objc
+IGSundialFeedDataSource.IGSundialFeedDataSource
 ```
 
-**Type encodings used below:** `q` long long · `Q` unsigned long long · `B` BOOL · `d` double · `@` object
+The useful method is:
 
-* * *
+```objc
+- (id)objectsForListAdapter:(id)adapter;
+```
 
-## Method mappings
+The returned objects have been confirmed to be `IGMedia` instances.
 
-Each table lists **Control** hooks (call to make something happen), **Detect** hooks (fire when it happens), and **Query**methods (read current state).
+Current hook:
 
-### Play / pause
+```objc
+%group swiftHooks
 
-Type
+%hook dataSource
 
-Class
+- (id)objectsForListAdapter:(id)arg1
+{
+    NSArray *originalFeed = %orig;
+    NSMutableArray *filteredFeed = [NSMutableArray array];
 
-Selector
+    for (id item in originalFeed) {
+        if ([item isKindOfClass:%c(IGAdItem)]) {
+            continue;
+        }
 
-Notes
+        [filteredFeed addObject:item];
+    }
 
-Control
+    feed = [filteredFeed copy];
 
-SC
+    return filteredFeed;
+}
 
-`_forcePausePlaybackWithReason:` [q]
+%end
 
-Reason enum unknown; start with `0`
+%end
+```
 
-Control
+This proves the tweak can already read and modify the array used by the Reels list adapter.
 
-SC
+The next test is to replace this array entirely with a fixed set of known `IGMedia` objects.
 
-`setExternalPlaybackPaused:reason:` [B, @]
+---
 
-Built for PiP/external ownership
+## Reel navigation detection
 
-Control
+The first implementation tried to detect navigation from video playback callbacks. That worked for video-to-video transitions but failed when scrolling to photo Reels.
 
-SC
+The reliable method is:
 
-`removePlaybackOverrides`
+```objc
+IGSundialUnconnectedFeedNetworkSource
+- (void)activeSectionDidChangeFrom:(NSInteger)oldSection
+                               to:(NSInteger)newSection;
+```
 
-Should release forced pauses (resume)
+Observed behavior:
 
-Control
+```text
+scroll down -> newSection = oldSection + 1
+scroll up   -> newSection = oldSection - 1
+```
 
-SC
+This works across video, photo, and carousel content.
 
-`seekToTime:` [d]
+Current hook:
 
-Seconds
+```objc
+%hook IGSundialUnconnectedFeedNetworkSource
 
-Control
+- (void)activeSectionDidChangeFrom:(NSInteger)oldSection
+                               to:(NSInteger)newSection
+{
+    %orig;
 
-FVC
+    if (newSection == oldSection + 1) {
+        NSLog(@"[ScrollParty Detection] Next Reel played");
+    }
+    else if (newSection == oldSection - 1) {
+        NSLog(@"[ScrollParty Detection] Previous Reel played");
+    }
+    else if (newSection != oldSection) {
+        NSLog(@"[ScrollParty Detection] Reel changed to unknown");
+    }
+}
 
-`stopCurrentVideo:` [q]
+%end
+```
 
-Stop, not toggle
+---
 
-Query
+## Playback
 
-SC
+Relevant class:
 
-`isPausedByViewer`
+```objc
+IGSundialViewerVideoCell
+```
 
-Detect
+Useful methods:
 
-SC
+```objc
+- playWithReason:
+- pauseWithReason:
+- stopWithReason:
+- prepareForPlayback
+- setPlaybackSpeed:
+- isPlaying
+- currentPlaybackTime
+- sundialVideoPlaybackViewDidStartPlaying:
+- videoViewDidPause:
+- videoViewDidStop:
+```
 
-`tapToPauseOwnerDidActivate:`
+Observed normal play:
 
-Paused by tap. May be tied to the shopping/visual-discovery layer
+```text
+playWithReason: 1
+```
 
-Detect
+Observed manual tap-to-pause:
 
-SC
+```text
+pauseWithReason: 7
+```
 
-`tapToPauseOwnerDidDeactivate:`
+`pauseWithReason:3` is not specific to scrolling. It also appears during comments and some UI interruptions.
 
-Resumed
+`-sundialVideoPlaybackViewDidStartPlaying:` can fire during normal playback, loops, and restarts, so it needs state-based deduplication.
 
-Detect
+---
 
-SC
+## Playback speed
 
-`sundialViewerVideoCell:didUpdatePlaybackState:` [`{q,d,d}`]
+Playback speed is exposed through:
 
-Struct field meanings unverified (state, time, duration?)
+```objc
+- setPlaybackSpeed:(float)speed;
+```
 
-Detect
+Observed:
 
-SC
+```text
+long press start -> 2.0
+release          -> 1.0
+```
 
-`sundialViewerVideoCellDidStartPlaying:`
+This is currently the best signal for 2x playback state.
 
-Detect
+---
 
-SC
+## Comments
 
-`sundialViewerVideoCellPlaybackWillStop:`
+Comments are represented by:
 
-Detect
+```objc
+IGCommentThreadViewController
+```
 
-SC
+Reliable detection:
 
-`sundialViewerVideoCellDidSingleTap:gestureRecognizer:`
+```objc
+- viewDidAppear:
+- viewDidDisappear:
+```
 
-Raw tap on video
+Current behavior:
 
-Detect
+```text
+viewDidAppear    -> comments opened
+viewDidDisappear -> comments closed
+```
 
-FVC
+The class also has:
 
-`videoStartedPlaying:`, `videoStopped:`
+```objc
+- _didTapDismiss
+```
 
-Feed-level
+which may be useful later for remote comment closing.
 
-Detect
+---
 
-FVC
+## Refresh detection
 
-`sundialViewerVideoSectionController:didUpdatePlaybackState:`[`{q,d,d}`]
+The current refresh signal comes from:
 
-Feed-level mirror of SC state
+```objc
+IGSundialUnconnectedFeedNetworkSource
+- sundialFeedNetworkSource:
+    willStartNewFeedSessionWithId:
+    previousSessionId:
+    prefetchType:
+```
 
-SC has no plain `play`/`pause`. Direct control likely lives on the player from `currentPlayerForExternalOwnership` or `_videoCell`, which hasn't been dumped yet. Avoid `beginExternalPlayerOwnership` / `endExternalPlayerOwnershipReclaiming:`. They hand the player off for PiP and can break playback.
+Observed values:
 
-### Playback speed (2x)
+```text
+manual refresh -> prefetchType = 0
+app startup    -> prefetchType = 3
+```
 
-Type
+For now, `prefetchType == 0` is treated as a Reels refresh.
 
-Class
+---
 
-Selector
+## Photo and carousel Reels
 
-Notes
+Instagram uses:
 
-Control
+```objc
+IGSundialViewerPhotoCell
+```
 
-SC
+for photo content in the Reels viewer.
 
-`resetPlaybackSpeedWithCell:` [@]
+The class exposes many of the same playback-style methods as the video cell:
 
-Back to 1x; pass `_videoCell`
+```objc
+- playWithReason:
+- pauseWithReason:
+- stopWithReason:
+- prepareForPlayback
+- setPlaybackSpeed:
+```
 
-Control
+There are also viewer callbacks for non-video sections and carousel changes:
 
-?
+```objc
+sundialViewerViewControllerDidShowNonPlaybackSection:
+sundialViewerViewController:didUpdateCarouselPostItemTo:
+```
 
-*Not found yet*
+Vertical Reel navigation is already handled by `activeSectionDidChangeFrom:to:`.
 
-Check `fastReelsManager`'s class for a set-speed method
+Horizontal carousel position still needs separate synchronization logic.
 
-Query
+---
 
-SC
+## IGMedia identifiers
 
-`isLongPressGestureForFastReels:cell:` [@, @]
+`IGMedia` exposes:
 
-Whether a long press is the speed gesture
+```objc
+- saveId
+- loggingMediaPk
+- giftableContentId
+```
 
-Detect
+`IGSundialViewerVideoCell` exposes:
 
-SC
+```objc
+- mediaPk
+```
 
-`fastForwardController:didChangeSpeedFrom:to:isUserInitiated:`[@, d, d, B]
+Observed example:
 
-**Primary candidate**
+```text
+saveId / cell mediaPk:
+4010786467422345960_5816106424
+```
 
-Detect
+The first component is the media PK:
 
-SC
+```text
+4010786467422345960
+```
 
-`fastForwardController:didReselectSpeed:` [@, d]
+The second component is the owner/account ID:
 
-Detect
+```text
+5816106424
+```
 
-SC
+`loggingMediaPk` and `giftableContentId` were observed to use the numeric media PK portion.
 
-`controlsOverlayControllerDidStartUFILongPress2xSpeed:`
+---
 
-Hold-for-2x began
+## IGMediaMap
 
-Detect
+The current focus is figuring out how Instagram constructs `IGMedia`.
 
-SC
+Relevant class:
 
-`controlsOverlayControllerDidStopUFILongPress2xSpeed:`
+```objc
+IGMediaMap
+```
 
-Hold-for-2x ended
+Interesting methods:
 
-Detect
+```objc
+- getIGMediaWithFragment:error:
+- mediaWithDict:
+- constructInstanceWithPK:initialTree:
+- objectWithPk:initialTree:
+- updateInstance:withDictionary:
+- objectWithDict:
+- edgeObjectWithDict:
+- objectFromConvertingFragmentTree:error:
+- consolidateDeserializedObject:
+- allObjects
+- mediaMap
+```
 
-SC
+### Dynamic trace results
 
-`handleFastReelsLockedActionWithShowToast:` [B]
+The following methods have been hooked:
 
-Speed locked
+```text
+mediaWithDict:
+objectWithDict:
+objectWithPk:initialTree:
+constructInstanceWithPK:initialTree:
+getIGMediaWithFragment:error:
+consolidateDeserializedObject:
+```
 
-Detect
+During app startup, `consolidateDeserializedObject:` fires frequently with existing `IGMedia` objects. This appears to be related to restoring or canonicalizing cached media.
 
-SC
+When opening Reels, Instagram first performs several calls like:
 
-`handleFastReelsUnlockedActionWithTouchPoint:showToast:`
+```text
+objectWithPk:initialTree:
+    initialTree = nil
+    result = IGMedia
+```
 
-Speed unlocked
+Fresh feed activity then includes calls like:
 
-Detect
+```text
+constructInstanceWithPK:
+    initialTree = nil
+    result = IGMedia
 
-SC
+mediaWithDict:
+    NSDictionary / NSMutableDictionary
+    result = IGMedia
+```
 
-`handleFastReelsExplicitlyUnlockedAction`
+During refresh, `mediaWithDict:` sometimes calls `constructInstanceWithPK:initialTree:` before returning an `IGMedia`.
 
-Detect
+Other `mediaWithDict:` calls return without a visible construction call, which suggests an existing object may already be present in the map.
 
-SC
+`getIGMediaWithFragment:error:` did not fire in the captured startup trace.
 
-`sundialViewerVideoCellDidLongPressBegin:` / `…Change:` / `…End:`
+### Current hypothesis
 
-Raw long press
+Current working model:
 
-### Next / previous reel
+```text
+mediaWithDict:
+    |
+    +-- extract media PK
+    |
+    +-- look up existing object in IGMediaMap
+    |
+    +-- if missing:
+    |      constructInstanceWithPK:initialTree:nil
+    |
+    +-- populate/update object from dictionary
+    |
+    +-- return IGMedia
+```
 
-Type
+The next method to trace is:
 
-Class
+```objc
+- updateInstance:withDictionary:
+```
 
-Selector
+The important test is whether the same object pointer flows through:
 
-Notes
+```text
+constructInstanceWithPK:
+        ↓
+updateInstance:withDictionary:
+        ↓
+mediaWithDict: return value
+```
 
-Control
+---
 
-FVC
+## Feed reconstruction plan
 
-`ig_arrowDown`
+The current plan is to avoid serializing live `IGMedia` objects directly.
 
-Next, no args
+Preferred flow:
 
-Control
+```text
+Device A
 
-FVC
+IGMedia / feed response
+        ↓
+portable media representation
+        ↓
+server
+        ↓
 
-`ig_arrowUp`
+Device B
 
-Previous, no args
+portable media representation
+        ↓
+IGMediaMap
+        ↓
+local IGMedia objects
+        ↓
+objectsForListAdapter:
+```
 
-Control
+Best case, only media IDs are needed.
 
-FVC
+If PK alone is not enough, the fallback is to send the dictionary used by:
 
-`scrollToNextItemAnimated:` [B]
+```objc
+mediaWithDict:
+```
 
-Next
+If that dictionary survives JSON serialization and can reconstruct a full `IGMedia` on another device, it is probably the right network representation.
 
-Control
+---
 
-FVC
+## IGMedia reconstruction tests
 
-`advanceToNextItemWithNavigationAction:` [q]
+### Cached media
 
-Next; action enum unknown
+Try to resolve a PK for a Reel already viewed in the current session.
 
-Control
+Success only proves that `IGMediaMap` can return cached objects.
 
-FVC
+### Cold launch
 
-`rewindToPreviousItemWithNavigationAction:` [q]
+1. Save a PK.
+2. Kill Instagram.
+3. Relaunch.
+4. Do not open that Reel.
+5. Try to resolve the PK.
 
-Previous
+### Never-seen media
 
-Control
+Use a PK collected from another device that the receiving phone has never loaded.
 
-FVC
+This is the most important PK-only test.
 
-`advanceToItemIndex:withNavigationAction:` [Q, q]
+### Dictionary round trip
 
-Jump to index
+Capture an actual dictionary passed into:
 
-Control
+```objc
+mediaWithDict:
+```
 
-FVC
+Then test:
 
-`scrollToMediaID:` [@]
+```text
+NSDictionary
+    ↓
+JSON
+    ↓
+deserialize
+    ↓
+NSDictionary
+    ↓
+mediaWithDict:
+    ↓
+IGMedia
+```
 
-**Jump to a specific reel; key for sync**
+### Fixed feed
 
-Control
+Build a five-item feed containing a mix of video, photo, and carousel posts.
 
-SC
+Force `objectsForListAdapter:` to always return it.
 
-`advanceToNextReel`
+Verify:
 
-Next, section level
+- correct order
+- forward / backward scrolling
+- video playback
+- image rendering
+- carousel rendering
+- comments
+- repeated scrolling
+- no crashes
 
-Query
+### Second device
 
-FVC
+Transfer the same media payload from Device A to Device B manually.
 
-`activeSection`, `currentViewerIndex`
+No server yet.
 
-Query
+Device B should reconstruct the media and show the same feed order.
 
-SC
+---
 
-`mediaIndex`
+## Static analysis targets
 
-Detect
+Static decompilation is useful now, but only for methods already confirmed to be relevant.
 
-ASM
+Priority:
 
-`notifyActiveSectionListenersWithPrevActiveSection:newActiveSection:`[q, q]
+```objc
+IGMediaMap - mediaWithDict:
+IGMediaMap - updateInstance:withDictionary:
+IGMediaMap - constructInstanceWithPK:initialTree:
+IGMediaMap - objectWithPk:initialTree:
+```
 
-**Primary candidate.**`new > prev` → next, `new < prev` → previous. Ignore the initial load
+Questions to answer:
 
-Detect
+- How does `mediaWithDict:` extract the PK?
+- Does it check the map first?
+- What does `constructInstanceWithPK:` initialize?
+- What is `initialTree` used for?
+- Does `mediaWithDict:` call `updateInstance:withDictionary:`?
+- Which dictionary keys are required?
+- How are nested users / carousel items handled?
+- Does a JSON-deserialized dictionary work?
+- Does any of this trigger a network request?
 
-FVC
+There is also:
 
-`setActiveSection:` [q]
+```objc
+IGMedia + valueWithJSONDictionary:objectMaps:error:
+```
 
-Detect
+which may be worth comparing with `IGMediaMap - mediaWithDict:` later.
 
-FVC
+---
 
-`updateNavigationAlphaForScrollDirection:index:object:` [Q, q, @]
+## Command-side work
 
-Carries a direction value
+The observer side is mostly mapped. The next major area is finding the methods that actually perform actions.
 
-Detect
+Desired helpers:
 
-FVC
+```text
+SPNext()
+SPPrevious()
+SPPlay()
+SPPause()
+SPSetPlaybackSpeed()
+SPOpenComments()
+SPCloseComments()
+SPSetCarouselIndex()
+SPRefresh()
+SPNavigateToMedia()
+```
 
-`scrollViewWillBeginDragging:`
+Likely easy:
 
-User-initiated swipe began
+```objc
+IGSundialViewerVideoCell
+- playWithReason:
+- pauseWithReason:
+- setPlaybackSpeed:
+```
 
-Detect
+Still unknown:
 
-FVC
+- next Reel
+- previous Reel
+- open comments
+- carousel movement
+- direct navigation to a media PK
 
-`advanceToNextReelForAutoScroll`
+`activeSectionDidChangeFrom:to:` should not be called to navigate. It reports a navigation change; it does not cause one.
 
-Auto-scroll, not the user
+---
 
-Detect
+## Synchronization architecture
 
-SC
+The first network version should use a WebSocket relay server.
 
-`didBecomeActive` / `didBecomeInactive`
+Each client:
 
-Per reel
+```text
+observe local state
+        ↓
+send normalized event
+        ↓
+server assigns revision
+        ↓
+other client receives event
+        ↓
+perform matching local action
+```
 
-Detect
+Media files themselves should not pass through the ScrollParty server. Each client should still load video and images from Instagram.
 
-SC
+A future room state could look like:
 
-`sectionWillAppear` / `sectionWillDisappear`, `handleScrollAway`
+```json
+{
+  "revision": 42,
+  "feedIndex": 12,
+  "mediaPk": "4010786467422345960",
+  "saveId": "4010786467422345960_5816106424",
+  "carouselIndex": 0,
+  "playing": true,
+  "speed": 1.0,
+  "commentsOpen": false
+}
+```
 
-`sundialViewerVideoCellDidSwipeBegin/Change/End` appear to be the **horizontal** swipe-to-profile gesture, not vertical paging.
+Relative commands such as `NEXT` are not enough on their own because a missed event would leave the clients out of sync.
 
-### Comments
+The server should keep an authoritative state snapshot so a reconnecting client can resync immediately.
 
-Type
+---
 
-Class
+## Event echo prevention
 
-Selector
+Remote actions will trigger the same hooks as local actions.
 
-Notes
+Example:
 
-Control
+```text
+A pauses
+  ↓
+server sends PAUSE to B
+  ↓
+B calls pauseWithReason:
+  ↓
+B's pause hook fires
+  ↓
+B sends PAUSE back
+```
 
-SC
+The first implementation can use a local flag such as:
 
-`presentCommentsViewControllerWithPreviewCommentID:sortOrder:truncateCaption:shouldDisplayKeyboard:shouldDisplayNudgeBanner:commentThreadEntryPoint:`
+```text
+applyingRemoteAction
+```
 
-Open. Try `nil, nil, NO, NO, NO, <0…n>`
+A better implementation should use:
 
-Control
+```text
+event ID
+source client ID
+server revision
+```
 
-SC → VC
+---
 
-`commentThreadViewController` → `dismissViewControllerAnimated:completion:`
+## Media availability
 
-Close
+The second account may not be able to view every Reel from the first account.
 
-Query
+Possible reasons include:
 
-SC
+- private account
+- blocked account
+- deleted Reel
+- region restriction
+- age restriction
+- other account-specific access restrictions
 
-`commentThreadViewController`
+The protocol will eventually need a way to report:
 
-Non-nil while open (verify)
+```text
+MEDIA_UNAVAILABLE
+```
 
-Detect
+and skip or resynchronize cleanly.
 
-SC
+---
 
-`presentCommentsViewControllerWithPreviewCommentID:…`
+## Debugging notes
 
-**Primary candidate for open**; likely the common funnel
+### Unified logging redaction
 
-Detect
+`NSLog` currently shows values such as:
 
-SC
+```text
+<private>
+```
 
-`handleCommentButtonTapWith:previewCommentID:sortOrder:…`
+for PKs, save IDs, and dictionary keys.
 
-Comment button path
+Use `fprintf(stderr, ...)` or a local debug file for reverse-engineering traces where literal values are needed.
 
-Detect
+### Duplicate Console logs
 
-SC
+At one point macOS Console displayed every tweak log twice even though the process and addresses were identical.
 
-`sundialViewerVideoCell:didTapCommentForSundialVideoPk:withKeyboard:commentThreadEntryPoint:`
+Restarting Console fixed it.
 
-Comment button tap
+This was not duplicate tweak injection.
 
-Detect
-
-SC
-
-`sundialViewerVideoCell:didTapCommentPreviewForSundialVideoPk:commentId:`
-
-Comment preview tap
-
-Detect
-
-SC
-
-`sundialViewerVideoCell:didTapCommentPromptWithParentCommentId:commentThreadEntryPoint:`
-
-Comment prompt tap
-
-Detect
-
-FVC
-
-`sundialViewerBottomBarDidTapComment:`, `handleAddCommentMessageBarTap`
-
-Bottom bar
-
-Detect
-
-FVC
-
-`sundialViewerInteractionCoordinator:shouldPresentCommentPanelWithConfiguration:`
-
-Feed-level funnel
-
-Detect
-
-SC
-
-`commentThreadViewControllerDidDismiss:`
-
-**Primary candidate for close**
-
-Detect
-
-SC / FVC
-
-`partialModalSheet:willChangeState:` / `didChangeState:` / `partialModalSheetDidDismiss:`
-
-Shared with other sheets; check the content VC class
-
-Detect
-
-SC / FVC
-
-`partialModalSheet:didUpdateOffset:presentationProgress:`
-
-Drag progress
-
-### Reel list & identity
-
-Type
-
-Class
-
-Selector
-
-Notes
-
-Query
-
-DS
-
-`objectsForListAdapter:` [@]
-
-**Full feed in order:** `IGMedia`, `IGAdItem`, and other models
-
-Query
-
-FVC
-
-`currentPlaybackMedia`
-
-Media on screen
-
-Query
-
-FVC
-
-`playbackMediaForPageIndex:` [q]
-
-Media at an index
-
-Query
-
-FVC
-
-`queuedMedias`, `sourceMediaPk`
-
-Query
-
-SC
-
-`video`, `parentMPk`
-
-Control
-
-FVC
-
-`scrollToMediaID:` [@]
-
-Jump to a reel by ID
-
-Control
-
-FVC
-
-`setQueuedMedias:` [@]
-
-Possibly inject specific reels
-
-Control
-
-FVC
-
-`setPendingScrollToMediaPkAfterRefresh:` [@]
-
-Scroll target after a refresh
-
-Detect
-
-FVC
-
-`sundialFeedNetworkSource:didInsertQueuedMedias:isFirstChunk:`
-
-New reels added
-
-Detect
-
-FVC
-
-`sundialFeedNetworkSourceDidUpdateObjects:`
-
-Feed list changed
-
-### Ad-related (affects indexes)
-
-Ads take up positions in the feed list. If ads are filtered out on one device but not another, **section indexes won't match between devices**.
-
-Class
-
-Selector
-
-Notes
-
-DS
-
-`objectsForListAdapter:`
-
-Ads appear here as `IGAdItem`
-
-FVC
-
-`displayInstreamAdWithAdItem:showPopoverAnimation:completion:`, `preLoadInstreamAdWithAdItem:`
-
-Ads played *inside* an organic reel, not in the list
-
-FVC
-
-`feedInjectionHandler:didInsertItems:`
-
-Items injected into the feed
-
-FVC
-
-`sundialFeedNetworkSource:didReplaceAdsAtIndices:`
-
-Index-based ad replacement
-
-FVC
-
-`adIdsInPool`, `nextAdItem`, `currentAdCell`
-
-FVC
-
-`mountDelaySkipFooterIfEligible`, `hideDelaySkipFooter`
-
-Short Drama delay-skip ads
-
-* * *
+---
 
 ## Roadmap
 
-### 1. Test detection and control hooks ⬜
+### Feed / model research
 
-- [ ] For each action (next, previous, pause, resume, 2x on/off, comments open/close), confirm which **Detect** hooks fire, and pick the most reliable one.
-  - [ ] Check that each fires exactly once per action.
-  - [ ] Check that each fires for every route: gestures, buttons, and programmatic calls.
-  - [ ] Check that none fires for unrelated actions.
-- [ ] For each action, confirm which **Control** method works cleanly with no visual glitches or broken state.
-- [ ] Decode the `{q,d,d}` playback-state struct.
-- [ ] Find valid values for the `reason`, `navigationAction`, and `commentThreadEntryPoint` enums.
-- [ ] Dump the player class and the `fastReelsManager` class to find direct play/pause/set-speed methods.
-- [ ] Find a way to tell user actions apart from programmatic ones, so replayed actions aren't re-detected.
-- [ ] Mark each row above as ✅ verified or ❌ wrong.
+- [x] Read `objectsForListAdapter:`
+- [x] Confirm feed objects are `IGMedia`
+- [x] Modify the returned feed
+- [x] Identify `IGMediaMap`
+- [x] Trace `mediaWithDict:`
+- [x] Trace `constructInstanceWithPK:initialTree:`
+- [x] Trace `objectWithPk:initialTree:`
+- [x] Trace `objectWithDict:`
+- [x] Trace `consolidateDeserializedObject:`
+- [ ] Trace `updateInstance:withDictionary:`
+- [ ] Log non-redacted PK / saveId values
+- [ ] Correlate object pointers through construction
+- [ ] Decompile `mediaWithDict:`
+- [ ] Decompile `updateInstance:withDictionary:`
+- [ ] Determine minimum reconstruction payload
+- [ ] Reconstruct media after cold launch
+- [ ] Reconstruct media on another device
+- [ ] Replace feed with a fixed custom array
 
-### 2. Local control server ⬜
+### Detection
 
-- [ ] Define the command set: `next`, `prev`, `pause`, `resume`, `speed <x>`, `comments open|close`, `goto <mediaId>`, `seek <seconds>`.
-- [ ] Define the event set: `NEXT`, `PREV`, `PAUSE`, `RESUME`, `SPEED <x>`, `COMMENTS_OPEN`, `COMMENTS_CLOSE`, `REEL <mediaId>`.
-- [ ] Map each command to its verified Control method and each event to its verified Detect hook.
-- [ ] Ensure all UI calls run on the main thread.
+- [x] Next Reel
+- [x] Previous Reel
+- [x] Play
+- [x] Pause
+- [x] Playback speed
+- [x] Comments open
+- [x] Comments close
+- [x] Refresh
+- [ ] Carousel index
+- [ ] Better explicit-play vs loop/restart distinction
+- [ ] Better pause classification
 
-### 3. Tandem scrolling (the other end) ⬜
+### Control
 
-- [ ] Build the peer that receives events from one device and replays them as commands on another.
-- [ ] Sync by **reel ID**, not by relative moves. Each device's feed is personalized and ads shift positions, so next/previous replay will drift.
-- [ ] Prevent loops, so an event replayed on device B isn't echoed back to device A.
-- [ ] Handle latency and ordering: sequence numbers and a leader/follower role.
-- [ ] Sync playback position after each jump.
+- [ ] Play
+- [ ] Pause
+- [ ] 1x / 2x
+- [ ] Next Reel
+- [ ] Previous Reel
+- [ ] Open comments
+- [ ] Close comments
+- [ ] Carousel navigation
+- [ ] Refresh
+- [ ] Navigate directly to media PK
 
-### 4. Encoding / decoding reel objects ⬜
+### Networking
 
-- [ ] Read the feed from DS `objectsForListAdapter:` and inspect `IGMedia` to find the field that identifies a reel portably (pk, media ID, or shortcode).
-- [ ] Define a wire format, e.g. `{ "mediaId": …, "pk": …, "position": <seconds>, "speed": <x>, "paused": <bool> }`.
-- [ ] Decode on the receiving side: jump with `scrollToMediaID:` when the reel is already in the feed.
-- [ ] Handle reels missing from the receiver's feed: test `setQueuedMedias:` and `setPendingScrollToMediaPkAfterRefresh:`.
+- [ ] WebSocket client
+- [ ] Relay server
+- [ ] Room creation
+- [ ] Room codes
+- [ ] Presence
+- [ ] Event relay
+- [ ] Server revisions
+- [ ] State snapshots
+- [ ] Reconnect / resync
+- [ ] Feed payload transfer
+- [ ] Media-unavailable handling
 
-* * *
+### Final synchronization
+
+- [ ] Same feed
+- [ ] Same Reel
+- [ ] Same carousel item
+- [ ] Same play / pause state
+- [ ] Same playback speed
+- [ ] Same comments state
+- [ ] Conflict handling
+- [ ] Drift detection
+- [ ] Automatic recovery
+
+---
+
+## Next step
+
+Immediate work:
+
+```text
+1. Hook updateInstance:withDictionary:
+2. Log non-redacted PK / saveId values
+3. Log object pointers
+4. Confirm the IGMediaMap construction path
+5. Decompile mediaWithDict: and updateInstance:withDictionary:
+6. Attempt a controlled IGMedia reconstruction
+```
+
+Networking should wait until feed reconstruction works locally.
 
 ## Notes
 
-- Everything here is from **451.0.0**. Swift module and class names change between versions; the data source has already moved modules once.
-- Swift-only methods don't appear in Objective-C class dumps.
-- Section controllers for neighbouring reels exist at the same time. Per-reel callbacks fire on the active one, but don't assume any given section controller instance is on screen.
+Instagram class names and selectors used here are private implementation details and may change between app versions.
+
+All behavior in this README is based on runtime testing against the currently tested Instagram build.
