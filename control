@@ -1,5 +1,5 @@
-Package: com.sladdagiri.igcouplerot
-Name: IGCoupleRot
+Package: com.sladdagiri.scrollparty
+Name: ScrollParty
 Version: 0.0.1
 Architecture: iphoneos-arm
 Description: An awesome MobileSubstrate tweak!
